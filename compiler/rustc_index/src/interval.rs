@@ -176,8 +176,6 @@ impl<I: Idx> IntervalSet<I> {
             return;
         }
 
-        let start = start.index() as u32;
-        let end = end.index() as u32;
         if let Some((_, last_end)) = self.map.last_mut() {
             assert!(*last_end <= start);
             // The start is already adjacent to the set.
