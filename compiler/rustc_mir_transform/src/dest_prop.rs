@@ -472,7 +472,7 @@ fn dest_prop_mir_dump<'tcx>(
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Effect {
     Before,
     After,
@@ -498,6 +498,10 @@ impl TwoStepIndex {
         let index = 2 * point.as_u32() + (effect as u32);
         // Reverse the indexing to use more efficient `IntervalSet::append`.
         TwoStepIndex::from_u32(max_index - index)
+    }
+
+    fn effect(self) -> Effect {
+        if self.as_u32() & 1 == 0 { Effect::After } else { Effect::Before }
     }
 }
 
@@ -528,8 +532,8 @@ fn save_as_intervals<'tcx>(
         }
 
         fn kill(&mut self, elem: Local) {
-            // Ensure we only kill for odd positions, so `insert_single` is well-behaved.
-            debug_assert!(self.current.as_u32() & 1 == 1);
+            // Ensure we only kill for `Effect::Before`, so `insert_single` is well-behaved.
+            debug_assert_eq!(self.current.effect(), Effect::Before);
             let Some(elem) = self.relevant.shrink[elem] else { return };
             if let Some(start) = self.pending[elem].take() {
                 debug_assert!(start <= self.current);
@@ -545,9 +549,9 @@ fn save_as_intervals<'tcx>(
         /// instance `move` operands in function calls or partial writes.
         fn insert_single(&mut self, elem: RelevantLocal) {
             // If we have a set pending, we will insert it when killing it, so nothing more to do.
-            // Kills only happen for odd positions, so we don't risk `kill` to insert
+            // Kills only happen for `Effect::Before`, so we don't risk `kill` to insert
             // a range excluding `self.current`.
-            debug_assert!(self.current.as_u32() & 1 == 0);
+            debug_assert_eq!(self.current.effect(), Effect::After);
             if self.pending[elem].is_none() {
                 self.values.append(elem, self.current);
             }
