@@ -798,7 +798,7 @@ where
         }
 
         let skip_contents = adt.is_union() || adt.is_manually_drop();
-        let contents_drop = if skip_contents {
+        let (contents_succ, contents_unwind, contents_dropline) = if skip_contents {
             if adt.has_dtor(self.tcx()) && self.elaborator.get_drop_flag(self.path).is_some() {
                 // the top-level drop flag is usually cleared by open_drop_for_adt_contents
                 // types with destructors would still need an empty drop ladder to clear it
@@ -817,21 +817,19 @@ where
         if adt.has_dtor(self.tcx()) {
             let destructor_block = if adt.is_box() {
                 // we need to drop the inside of the box before running the destructor
-                let succ = self.destructor_call_block_sync((contents_drop.0, contents_drop.1));
-                let unwind = contents_drop
-                    .1
-                    .map(|unwind| self.destructor_call_block_sync((unwind, Unwind::InCleanup)));
-                let dropline = contents_drop
-                    .2
-                    .map(|dropline| self.destructor_call_block_sync((dropline, contents_drop.1)));
+                let succ = self.destructor_call_block_sync(contents_succ, contents_unwind);
+                let unwind = contents_unwind
+                    .map(|unwind| self.destructor_call_block_sync(unwind, Unwind::InCleanup));
+                let dropline = contents_dropline
+                    .map(|dropline| self.destructor_call_block_sync(dropline, contents_unwind));
                 self.open_drop_for_box_contents(adt, args, succ, unwind, dropline)
             } else {
-                self.destructor_call_block(contents_drop)
+                self.destructor_call_block(contents_succ, contents_unwind, contents_dropline)
             };
 
-            self.drop_flag_test_block(destructor_block, contents_drop.0, contents_drop.1)
+            self.drop_flag_test_block(destructor_block, contents_succ, contents_unwind)
         } else {
-            contents_drop.0
+            contents_succ
         }
     }
 
@@ -993,7 +991,7 @@ where
     }
 
     #[instrument(level = "debug", skip(self), ret)]
-    fn destructor_call_block_sync(&mut self, (succ, unwind): (BasicBlock, Unwind)) -> BasicBlock {
+    fn destructor_call_block_sync(&mut self, succ: BasicBlock, unwind: Unwind) -> BasicBlock {
         let tcx = self.tcx();
         let drop_trait = tcx.require_lang_item(LangItem::Drop, DUMMY_SP);
         let drop_fn = tcx.associated_item_def_ids(drop_trait)[0];
@@ -1039,13 +1037,15 @@ where
     #[instrument(level = "debug", skip(self), ret)]
     fn destructor_call_block(
         &mut self,
-        (succ, unwind, dropline): (BasicBlock, Unwind, Option<BasicBlock>),
+        succ: BasicBlock,
+        unwind: Unwind,
+        dropline: Option<BasicBlock>,
     ) -> BasicBlock {
         let ty = self.place_ty(self.place);
         if !unwind.is_cleanup() && self.check_if_can_async_drop(ty, true) {
             self.build_async_drop(self.place, ty, None, succ, unwind, dropline, true)
         } else {
-            self.destructor_call_block_sync((succ, unwind))
+            self.destructor_call_block_sync(succ, unwind)
         }
     }
 
