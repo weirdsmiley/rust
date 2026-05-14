@@ -207,6 +207,7 @@ where
     // We keep async drop unexpanded to poll-loop here, to expand it later, at StateTransform -
     //   into states expand.
     // call_destructor_only - to call only AsyncDrop::drop, not full async_drop_in_place glue
+    #[instrument(level = "debug", skip(self), ret)]
     fn build_async_drop(
         &mut self,
         place: Place<'tcx>,
@@ -565,6 +566,7 @@ where
             .collect()
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_subpath(
         &mut self,
         place: Place<'tcx>,
@@ -574,8 +576,6 @@ where
         dropline: Option<BasicBlock>,
     ) -> BasicBlock {
         if let Some(path) = path {
-            debug!("drop_subpath: for std field {:?}", place);
-
             DropCtxt {
                 elaborator: self.elaborator,
                 source_info: self.source_info,
@@ -587,8 +587,6 @@ where
             }
             .elaborated_drop_block()
         } else {
-            debug!("drop_subpath: for rest field {:?}", place);
-
             DropCtxt {
                 elaborator: self.elaborator,
                 source_info: self.source_info,
@@ -614,6 +612,7 @@ where
     /// `dropline_ladder` is a similar list of steps in reverse order,
     /// which is called if the matching step of the drop glue will contain async drop
     /// (expanded later to Yield) and the containing coroutine will be dropped at this point.
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_halfladder(
         &mut self,
         unwind_ladder: &[Unwind],
@@ -679,6 +678,7 @@ where
     ///
     /// NOTE: this does not clear the master drop flag, so you need
     /// to point succ/unwind on a `drop_ladder_bottom`.
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_ladder(
         &mut self,
         fields: Vec<(Place<'tcx>, Option<D::Path>)>,
@@ -686,7 +686,6 @@ where
         unwind: Unwind,
         dropline: Option<BasicBlock>,
     ) -> (BasicBlock, Unwind, Option<BasicBlock>) {
-        debug!("drop_ladder({:?}, {:?})", self, fields);
         assert!(
             if unwind.is_cleanup() { dropline.is_none() } else { true },
             "Dropline is set for cleanup drop ladder"
@@ -723,9 +722,8 @@ where
         )
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn open_drop_for_tuple(&mut self, tys: &[Ty<'tcx>]) -> BasicBlock {
-        debug!("open_drop_for_tuple({:?}, {:?})", self, tys);
-
         let fields = tys
             .iter()
             .enumerate()
@@ -994,8 +992,8 @@ where
         self.drop_flag_test_block(switch_block, succ, unwind)
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn destructor_call_block_sync(&mut self, (succ, unwind): (BasicBlock, Unwind)) -> BasicBlock {
-        debug!("destructor_call_block_sync({:?}, {:?})", self, succ);
         let tcx = self.tcx();
         let drop_trait = tcx.require_lang_item(LangItem::Drop, DUMMY_SP);
         let drop_fn = tcx.associated_item_def_ids(drop_trait)[0];
@@ -1038,11 +1036,11 @@ where
         self.elaborator.patch().new_block(result)
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn destructor_call_block(
         &mut self,
         (succ, unwind, dropline): (BasicBlock, Unwind, Option<BasicBlock>),
     ) -> BasicBlock {
-        debug!("destructor_call_block({:?}, {:?})", self, succ);
         let ty = self.place_ty(self.place);
         if !unwind.is_cleanup() && self.check_if_can_async_drop(ty, true) {
             self.build_async_drop(self.place, ty, None, succ, unwind, dropline, true)
@@ -1140,13 +1138,13 @@ where
         loop_block
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn open_drop_for_array(
         &mut self,
         array_ty: Ty<'tcx>,
         ety: Ty<'tcx>,
         opt_size: Option<u64>,
     ) -> BasicBlock {
-        debug!("open_drop_for_array({:?}, {:?}, {:?})", array_ty, ety, opt_size);
         let tcx = self.tcx();
 
         if let Some(size) = opt_size {
@@ -1250,8 +1248,8 @@ where
 
     /// Creates a trio of drop-loops of `place`, which drops its contents, even
     /// in the case of 1 panic or in the case of coroutine drop
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_loop_trio_for_slice(&mut self, ety: Ty<'tcx>) -> BasicBlock {
-        debug!("drop_loop_trio_for_slice({:?})", ety);
         let tcx = self.tcx();
         let len = self.new_temp(tcx.types.usize);
         let cur = self.new_temp(tcx.types.usize);
@@ -1349,24 +1347,21 @@ where
         }
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn complete_drop(&mut self, succ: BasicBlock, unwind: Unwind) -> BasicBlock {
-        debug!("complete_drop(succ={:?}, unwind={:?})", succ, unwind);
-
         let drop_block = self.drop_block(succ, unwind);
-
         self.drop_flag_test_block(drop_block, succ, unwind)
     }
 
     /// Creates a block that resets the drop flag. If `mode` is deep, all children drop flags will
     /// also be cleared.
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_flag_reset_block(
         &mut self,
         mode: DropFlagMode,
         succ: BasicBlock,
         unwind: Unwind,
     ) -> BasicBlock {
-        debug!("drop_flag_reset_block({:?},{:?})", self, mode);
-
         if unwind.is_cleanup() {
             // The drop flag isn't read again on the unwind path, so don't
             // bother setting it.
@@ -1378,8 +1373,8 @@ where
         block
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn elaborated_drop_block(&mut self) -> BasicBlock {
-        debug!("elaborated_drop_block({:?})", self);
         let blk = self.drop_block_simple(self.succ, self.unwind);
         self.elaborate_drop(blk);
         blk
@@ -1432,6 +1427,7 @@ where
     /// Depending on the required `DropStyle`, this might be a generated block with an `if`
     /// terminator (for dynamic/open drops), or it might be `on_set` or `on_unset` itself, in case
     /// the drop can be statically determined.
+    #[instrument(level = "debug", skip(self), ret)]
     fn drop_flag_test_block(
         &mut self,
         on_set: BasicBlock,
@@ -1439,11 +1435,6 @@ where
         unwind: Unwind,
     ) -> BasicBlock {
         let style = self.elaborator.drop_style(self.path, DropFlagMode::Shallow);
-        debug!(
-            "drop_flag_test_block({:?},{:?},{:?},{:?}) - {:?}",
-            self, on_set, on_unset, unwind, style
-        );
-
         match style {
             DropStyle::Dead => on_unset,
             DropStyle::Static => on_set,
@@ -1455,6 +1446,7 @@ where
         }
     }
 
+    #[instrument(level = "trace", skip(self), ret)]
     fn new_block(&mut self, unwind: Unwind, k: TerminatorKind<'tcx>) -> BasicBlock {
         self.elaborator.patch().new_block(BasicBlockData::new(
             Some(Terminator { source_info: self.source_info, kind: k }),
@@ -1462,6 +1454,7 @@ where
         ))
     }
 
+    #[instrument(level = "trace", skip(self, statements), ret)]
     fn new_block_with_statements(
         &mut self,
         unwind: Unwind,
