@@ -222,14 +222,8 @@ where
         let span = self.source_info.span;
 
         let pin_obj_bb = bb.unwrap_or_else(|| {
-            self.elaborator.patch().new_block(BasicBlockData::new(
-                Some(Terminator {
-                    // Temporary terminator, will be replaced by patch
-                    source_info: self.source_info,
-                    kind: TerminatorKind::Return,
-                }),
-                false,
-            ))
+            // Temporary terminator, will be replaced by patch
+            self.new_block(unwind, TerminatorKind::Return)
         });
 
         let (fut_ty, drop_fn_def_id, trait_args) = if call_destructor_only {
@@ -594,8 +588,7 @@ where
                 succ,
                 unwind,
                 dropline,
-                // Using `self.path` here to condition the drop on
-                // our own drop flag.
+                // Using `self.path` here to condition the drop on our own drop flag.
                 path: self.path,
             }
             .complete_drop(succ, unwind)
@@ -767,18 +760,14 @@ where
 
         let do_drop_bb = self.drop_subpath(interior, interior_path, succ, unwind, dropline);
 
-        let setup_bbd = BasicBlockData::new_stmts(
+        self.new_block_with_statements(
+            unwind,
             vec![self.assign(
                 Place::from(ptr_local),
                 Rvalue::Cast(CastKind::Transmute, Operand::Copy(nonnull_place), ptr_ty),
             )],
-            Some(Terminator {
-                kind: TerminatorKind::Goto { target: do_drop_bb },
-                source_info: self.source_info,
-            }),
-            unwind.is_cleanup(),
-        );
-        self.elaborator.patch().new_block(setup_bbd)
+            TerminatorKind::Goto { target: do_drop_bb },
+        )
     }
 
     #[instrument(level = "debug", ret)]
@@ -788,13 +777,7 @@ where
         args: GenericArgsRef<'tcx>,
     ) -> BasicBlock {
         if adt.variants().is_empty() {
-            return self.elaborator.patch().new_block(BasicBlockData::new(
-                Some(Terminator {
-                    source_info: self.source_info,
-                    kind: TerminatorKind::Unreachable,
-                }),
-                self.unwind.is_cleanup(),
-            ));
+            return self.new_block(self.unwind, TerminatorKind::Unreachable);
         }
 
         let skip_contents = adt.is_union() || adt.is_manually_drop();
@@ -972,21 +955,17 @@ where
         let discr_ty = adt.repr().discr_type().to_ty(self.tcx());
         let discr = Place::from(self.new_temp(discr_ty));
         let discr_rv = Rvalue::Discriminant(self.place);
-        let switch_block = BasicBlockData::new_stmts(
+        let switch_block = self.new_block_with_statements(
+            unwind,
             vec![self.assign(discr, discr_rv)],
-            Some(Terminator {
-                source_info: self.source_info,
-                kind: TerminatorKind::SwitchInt {
-                    discr: Operand::Move(discr),
-                    targets: SwitchTargets::new(
-                        values.iter().copied().zip(blocks.iter().copied()),
-                        *blocks.last().unwrap(),
-                    ),
-                },
-            }),
-            unwind.is_cleanup(),
+            TerminatorKind::SwitchInt {
+                discr: Operand::Move(discr),
+                targets: SwitchTargets::new(
+                    values.iter().copied().zip(blocks.iter().copied()),
+                    *blocks.last().unwrap(),
+                ),
+            },
         );
-        let switch_block = self.elaborator.patch().new_block(switch_block);
         self.drop_flag_test_block(switch_block, succ, unwind)
     }
 
@@ -1001,7 +980,8 @@ where
         let ref_place = self.new_temp(ref_ty);
         let unit_temp = Place::from(self.new_temp(tcx.types.unit));
 
-        let result = BasicBlockData::new_stmts(
+        self.new_block_with_statements(
+            unwind,
             vec![self.assign(
                 Place::from(ref_place),
                 Rvalue::Ref(
@@ -1010,28 +990,17 @@ where
                     self.place,
                 ),
             )],
-            Some(Terminator {
-                kind: TerminatorKind::Call {
-                    func: Operand::function_handle(
-                        tcx,
-                        drop_fn,
-                        [ty.into()],
-                        self.source_info.span,
-                    ),
-                    args: [Spanned { node: Operand::Move(Place::from(ref_place)), span: DUMMY_SP }]
-                        .into(),
-                    destination: unit_temp,
-                    target: Some(succ),
-                    unwind: unwind.into_action(),
-                    call_source: CallSource::Misc,
-                    fn_span: self.source_info.span,
-                },
-                source_info: self.source_info,
-            }),
-            unwind.is_cleanup(),
-        );
-
-        self.elaborator.patch().new_block(result)
+            TerminatorKind::Call {
+                func: Operand::function_handle(tcx, drop_fn, [ty.into()], self.source_info.span),
+                args: [Spanned { node: Operand::Move(Place::from(ref_place)), span: DUMMY_SP }]
+                    .into(),
+                destination: unit_temp,
+                target: Some(succ),
+                unwind: unwind.into_action(),
+                call_source: CallSource::Misc,
+                fn_span: self.source_info.span,
+            },
+        )
     }
 
     #[instrument(level = "debug", skip(self), ret)]
@@ -1078,7 +1047,8 @@ where
         let can_go = Place::from(self.new_temp(tcx.types.bool));
         let one = self.constant_usize(1);
 
-        let drop_block = BasicBlockData::new_stmts(
+        let drop_block = self.new_block_with_statements(
+            unwind,
             vec![
                 self.assign(
                     ptr,
@@ -1089,27 +1059,18 @@ where
                     Rvalue::BinaryOp(BinOp::Add, Box::new((move_(cur.into()), one))),
                 ),
             ],
-            Some(Terminator {
-                source_info: self.source_info,
-                // this gets overwritten by drop elaboration.
-                kind: TerminatorKind::Unreachable,
-            }),
-            unwind.is_cleanup(),
+            // this gets overwritten by drop elaboration.
+            TerminatorKind::Unreachable,
         );
-        let drop_block = self.elaborator.patch().new_block(drop_block);
 
-        let loop_block = BasicBlockData::new_stmts(
+        let loop_block = self.new_block_with_statements(
+            unwind,
             vec![self.assign(
                 can_go,
                 Rvalue::BinaryOp(BinOp::Eq, Box::new((copy(Place::from(cur)), copy(len.into())))),
             )],
-            Some(Terminator {
-                source_info: self.source_info,
-                kind: TerminatorKind::if_(move_(can_go), succ, drop_block),
-            }),
-            unwind.is_cleanup(),
+            TerminatorKind::if_(move_(can_go), succ, drop_block),
         );
-        let loop_block = self.elaborator.patch().new_block(loop_block);
 
         let place = tcx.mk_place_deref(ptr);
         if !unwind.is_cleanup() && self.check_if_can_async_drop(ety, false) {
@@ -1213,7 +1174,15 @@ where
         let slice_ptr_ty = Ty::new_mut_ptr(tcx, slice_ty);
         let slice_ptr = self.new_temp(slice_ptr_ty);
 
-        let mut delegate_block = BasicBlockData::new_stmts(
+        let array_place = mem::replace(
+            &mut self.place,
+            Place::from(slice_ptr).project_deeper(&[PlaceElem::Deref], tcx),
+        );
+        let slice_block = self.drop_loop_trio_for_slice(ety);
+        self.place = array_place;
+
+        self.new_block_with_statements(
+            self.unwind,
             vec![
                 self.assign(Place::from(array_ptr), Rvalue::RawPtr(RawPtrKind::Mut, self.place)),
                 self.assign(
@@ -1228,22 +1197,8 @@ where
                     ),
                 ),
             ],
-            None,
-            self.unwind.is_cleanup(),
-        );
-
-        let array_place = mem::replace(
-            &mut self.place,
-            Place::from(slice_ptr).project_deeper(&[PlaceElem::Deref], tcx),
-        );
-        let slice_block = self.drop_loop_trio_for_slice(ety);
-        self.place = array_place;
-
-        delegate_block.terminator = Some(Terminator {
-            source_info: self.source_info,
-            kind: TerminatorKind::Goto { target: slice_block },
-        });
-        self.elaborator.patch().new_block(delegate_block)
+            TerminatorKind::Goto { target: slice_block },
+        )
     }
 
     /// Creates a trio of drop-loops of `place`, which drops its contents, even
@@ -1272,7 +1227,8 @@ where
         };
 
         let zero = self.constant_usize(0);
-        let block = BasicBlockData::new_stmts(
+        let drop_block = self.new_block_with_statements(
+            unwind,
             vec![
                 self.assign(
                     len.into(),
@@ -1283,14 +1239,9 @@ where
                 ),
                 self.assign(cur.into(), Rvalue::Use(zero, WithRetag::Yes)),
             ],
-            Some(Terminator {
-                source_info: self.source_info,
-                kind: TerminatorKind::Goto { target: loop_block },
-            }),
-            unwind.is_cleanup(),
+            TerminatorKind::Goto { target: loop_block },
         );
 
-        let drop_block = self.elaborator.patch().new_block(block);
         // FIXME(#34708): handle partially-dropped array/slice elements.
         let reset_block = self.drop_flag_reset_block(DropFlagMode::Deep, drop_block, unwind);
         self.drop_flag_test_block(reset_block, self.succ, unwind)
@@ -1334,13 +1285,7 @@ where
                     self.source_info.span,
                     "open drop for unsafe binder shouldn't be encountered",
                 );
-                self.elaborator.patch().new_block(BasicBlockData::new(
-                    Some(Terminator {
-                        source_info: self.source_info,
-                        kind: TerminatorKind::Unreachable,
-                    }),
-                    self.unwind.is_cleanup(),
-                ))
+                self.new_block(self.unwind, TerminatorKind::Unreachable)
             }
 
             _ => span_bug!(self.source_info.span, "open drop from non-ADT `{:?}`", ty),
@@ -1375,21 +1320,19 @@ where
 
     #[instrument(level = "debug", skip(self), ret)]
     fn elaborated_drop_block(&mut self) -> BasicBlock {
-        let blk = self.drop_block_simple(self.succ, self.unwind);
+        let blk = self.new_block(
+            self.unwind,
+            TerminatorKind::Drop {
+                place: self.place,
+                target: self.succ,
+                unwind: self.unwind.into_action(),
+                replace: false,
+                drop: self.dropline,
+                async_fut: None,
+            },
+        );
         self.elaborate_drop(blk);
         blk
-    }
-
-    fn drop_block_simple(&mut self, target: BasicBlock, unwind: Unwind) -> BasicBlock {
-        let block = TerminatorKind::Drop {
-            place: self.place,
-            target,
-            unwind: unwind.into_action(),
-            replace: false,
-            drop: self.dropline,
-            async_fut: None,
-        };
-        self.new_block(unwind, block)
     }
 
     fn drop_block(&mut self, target: BasicBlock, unwind: Unwind) -> BasicBlock {
@@ -1405,15 +1348,17 @@ where
                 false,
             )
         } else {
-            let block = TerminatorKind::Drop {
-                place: self.place,
-                target,
-                unwind: unwind.into_action(),
-                replace: false,
-                drop: None,
-                async_fut: None,
-            };
-            self.new_block(unwind, block)
+            self.new_block(
+                unwind,
+                TerminatorKind::Drop {
+                    place: self.place,
+                    target,
+                    unwind: unwind.into_action(),
+                    replace: false,
+                    drop: None,
+                    async_fut: None,
+                },
+            )
         }
     }
 
